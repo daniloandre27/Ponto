@@ -1,6 +1,6 @@
 {
-    "host": "localhost",
-    "database": "C:/DNA/Ponto/DADOS.FDB",
+    "host": "26.223.207.100",
+    "database": "\\26.223.207.100\dna\Ponto\DADOS.FDB",
     "user": "SYSDBA",
     "password": "masterkey",
     "charset": "WIN1252"
