@@ -1,0 +1,7 @@
+{
+    "host": "localhost",
+    "database": "C:/DNA/Ponto/DADOS.FDB",
+    "user": "SYSDBA",
+    "password": "masterkey",
+    "charset": "WIN1252"
+}
