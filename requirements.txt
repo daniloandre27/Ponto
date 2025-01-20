@@ -1,0 +1,8 @@
+pandas
+streamlit
+google-auth-oauthlib
+google-auth
+google-api-python-client
+fdb
+fpdf
+pillow
