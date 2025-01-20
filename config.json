@@ -4,5 +4,5 @@
     "user": "SYSDBA",
     "password": "masterkey",
     "charset": "WIN1252",
-    "fbclient": "C:/DNA/Firebird/fbclient.dll"
+    "fbclient": "//26.223.207.100/C:/DNA/Firebird/fbclient.dll"
 }
