@@ -3,5 +3,6 @@
     "database": "C:/DNA/Ponto/DADOS.FDB",
     "user": "SYSDBA",
     "password": "masterkey",
-    "charset": "WIN1252"
+    "charset": "WIN1252",
+    "fbclient": "C:/DNA/Firebird/bin/fbclient.dll"
 }
