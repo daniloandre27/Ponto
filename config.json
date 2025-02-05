@@ -1,8 +1,7 @@
 {
+    "database": "dados",
+    "user": "postgres",
+    "password": "1234",
     "host": "26.223.207.100",
-    "database": "C:/DNA/Ponto/DADOS.FDB",
-    "user": "SYSDBA",
-    "password": "masterkey",
-    "charset": "WIN1252",
-    "fbclient": "//26.223.207.100/C:/DNA/Firebird/fbclient.dll"
+    "port": 5432
 }
