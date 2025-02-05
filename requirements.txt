@@ -5,5 +5,4 @@ pandas
 google-auth-oauthlib
 google-auth-httplib2
 google-auth
-google-auth-transport-requests
 google-api-python-client
