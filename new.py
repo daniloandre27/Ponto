@@ -184,7 +184,7 @@ def tela_inicial():
 
 
 def tela_login():
-    logo = "C:\\Users\\Jarvis\\Documents\\Projetos\\Ponto\\logo-dna.png"
+    logo = "./logo-dna.png"
 
     with open(logo, "rb") as image_file:
         base64_image = base64.b64encode(image_file.read()).decode()
