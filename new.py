@@ -1,108 +1,187 @@
-import fdb
-import json
 import streamlit as st
+import psycopg2
+import json
+import re
+from pathlib import Path
 from datetime import datetime, time,timedelta
 import time as tm
 from fpdf import FPDF
-from calendario import exibir_calendario, exibir_formulario_ferias,minhas_ferias_marcadas,ferias_marcadas,add_evento
+#from calendario import exibir_calendario, exibir_formulario_ferias,minhas_ferias_marcadas,ferias_marcadas,add_evento
 import tempfile
 import os
-from PIL import Image
 import base64
-from io import BytesIO
 import pandas as pd
 import hashlib
-#st.set_page_config(page_title="Sistema de Ponto")
+from io import BytesIO
+from zipfile import ZipFile
+import pickle
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+st.set_page_config(page_title="Sistema de Ponto", layout="centered")
+# 🔹 Função para carregar as configurações do banco de dados
 
-def carregar_configuracao():
-    try:
-        with open('config.json', 'r') as file:
-            return json.load(file)
-    except FileNotFoundError:
-        st.error("Arquivo de configuração 'config.json' não encontrado.")
-        return None
-    except json.JSONDecodeError as e:
-        st.error(f"Erro ao decodificar 'config.json': {e}")
-        return None
+DB_CONFIG = {
+    "host": st.secrets["DB_HOST"],
+    "database": st.secrets["DB_NAME"],
+    "user": st.secrets["DB_USER"],
+    "password": st.secrets["DB_PASS"],
+    "port": st.secrets["DB_PORT"]
+}
 
-# Configurações do banco de dados
-DB_CONFIG = carregar_configuracao()
-
-# Conexão persistente com o banco de dados
 @st.cache_resource
 def obter_conexao_persistente():
-    if not DB_CONFIG:
-        st.error("Configurações do banco não carregadas.")
-        return None
     try:
-        return fdb.connect(**DB_CONFIG)
+        conn = psycopg2.connect(
+            dbname=DB_CONFIG["database"],
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            host=DB_CONFIG["host"],
+            port=DB_CONFIG["port"]
+        )
+        return conn
     except Exception as e:
         st.error(f"Erro ao conectar ao banco de dados: {e}")
         return None
 
-# Reutilizar a conexão persistente
+# Criar conexão
 conexao_persistente = obter_conexao_persistente()
+
 
 # Função para criptografar senhas
 def criptografar_senha(senha):
     return hashlib.sha256(senha.encode()).hexdigest()
 
 # Tela inicial
+
+import streamlit as st
+
 def tela_inicial():
-    #st.markdown("<h1 style='text-align: center;'>Sistema de Registro de Ponto</h1>", unsafe_allow_html=True)
     if "usuario" not in st.session_state:
         tela_login()
     else:
+        # 🔹 Sidebar sempre visível
         st.sidebar.image("logo-dna.png", use_container_width=True)
         usuario = st.session_state["usuario"]
-        menu = ["Registrar Ponto"]
-        menu.append("Agenda")
-        menu.append("Visualizar Registros")
-        menu.append("Minhas Horas Extras")
-        menu.append("Minhas Férias")
-        menu.append("Alterar Senha")
+
+        # 🔹 Definir "Registrar Ponto" como a tela inicial automaticamente após login
+        if "menu_ativo" not in st.session_state:
+            st.session_state.menu_ativo = "Registrar Ponto"  # 🔥 Tela inicial
+
+        # 🔹 Resetar os menus ao trocar de seleção
+        def resetar_menus(exceto=None):
+            """Reseta os menus, exceto o que foi selecionado"""
+            if exceto != "geral":
+                st.session_state.menu_geral = None
+            if exceto != "admin":
+                st.session_state.menu_admin = None
+            if exceto != "agenda":
+                st.session_state.menu_agenda = None
+            if exceto != "edita_ponto":
+                st.session_state.menu_edita_ponto = None
+
+        # 🔹 Menu Geral (Agora recolhido por padrão)
+        with st.sidebar.expander("📌 Menu Geral", expanded=False):  # 🔽 Fica recolhido por padrão
+            escolha_geral = st.radio(
+                "Opções Gerais", 
+                ["Registrar Ponto", "Agenda", "Meus Registros", "Minhas Faltas",
+                 "Minhas Horas Extras", "Minhas Férias", "Alterar Senha"], 
+                index=None,  
+                key="menu_geral",
+                on_change=resetar_menus, 
+                args=("geral",)
+            )
+
+        # 🔹 Menu Administração (Recolhido por padrão)
+        escolha_admin = None
         if usuario.get("administrador"):
-            menu.append("Cadastrar Funcionário")
-            menu.append("Manutenção de Cadastro")
-            menu.append("Agendamento")
-            menu.append("Ferias Marcadas")
-            menu.append("Banco de Horas")
-            menu.append("Manutenção de Senha")
-            menu.append("Agendar Ferias")
-        menu.append("Sair")
-        escolha = st.sidebar.selectbox("Opções", menu, label_visibility="hidden")
-        if escolha == "Registrar Ponto":
+            with st.sidebar.expander("🔧 Administração", expanded=False):  # 🔽 Fica recolhido por padrão
+                escolha_admin = st.radio(
+                    "Opções Administrativas",
+                    ["Cadastrar Funcionário", "Alterar Cadastro", "Manutenção de Senha",
+                     "Banco de Horas", "Registro de Faltas", "Registros do Ponto"],
+                    index=None,  
+                    key="menu_admin",
+                    on_change=resetar_menus, 
+                    args=("admin",)
+                )
+
+        # 🔹 Menu Agenda (Recolhido por padrão)
+        escolha_agenda = None
+        if usuario.get("agendamento"):
+            with st.sidebar.expander("📅 Agenda", expanded=False):  # 🔽 Fica recolhido por padrão
+                escolha_agenda = st.radio(
+                    "Opções de Agenda",
+                    ["Agendar Férias", "Férias Marcadas", "Agendamento"],
+                    index=None,  
+                    key="menu_agenda",
+                    on_change=resetar_menus, 
+                    args=("agenda",)
+                )
+
+        # 🔹 Menu Gerência/Ponto (Recolhido por padrão)
+        escolha_editar_ponto = None
+        if usuario.get("edita_ponto"):
+            with st.sidebar.expander("🕒 Gerenciamento de Ponto", expanded=False):  # 🔽 Fica recolhido por padrão
+                escolha_editar_ponto = st.radio(
+                    "Gerência",
+                    ["Manutenção do Ponto"],
+                    index=None,  
+                    key="menu_edita_ponto",
+                    on_change=resetar_menus, 
+                    args=("edita_ponto",)
+                )
+
+        # 🔹 Atualizar estado da sessão com base na escolha ativa
+        escolha = escolha_geral or escolha_admin or escolha_agenda or escolha_editar_ponto
+        if escolha:
+            st.session_state.menu_ativo = escolha  # Armazena a escolha ativa no session_state
+
+        # 🔹 Exibir apenas UMA TELA por vez (conforme a escolha ativa)
+        if st.session_state.menu_ativo == "Registrar Ponto":
             tela_funcionario()
-        elif escolha == "Alterar Senha":
+        elif st.session_state.menu_ativo == "Alterar Senha":
             alterar_senha()
-        elif escolha == "Visualizar Registros":
-            tela_periodo_trabalhado()
-        elif escolha == "Agenda":
+        elif st.session_state.menu_ativo == "Agenda":
             exibir_calendario()
-        elif escolha == "Minhas Horas Extras":
+        elif st.session_state.menu_ativo == "Meus Registros":
+            tela_periodo_trabalhado()
+        elif st.session_state.menu_ativo == "Minhas Faltas":
+            tela_usuario_faltas()
+        elif st.session_state.menu_ativo == "Minhas Horas Extras":
             tela_banco_horas()
-        elif escolha == "Minhas Férias":
+        elif st.session_state.menu_ativo == "Minhas Férias":
             minhas_ferias_marcadas()
-        elif escolha == "Manutenção de Senha":
-            tela_alterar_senha_admin()            
-        elif escolha == "Cadastrar Funcionário" and usuario.get("administrador"):
+
+        elif st.session_state.menu_ativo == "Cadastrar Funcionário":
             tela_administracao()
-        elif escolha == "Manutenção de Cadastro"and usuario.get("administrador"):
+        elif st.session_state.menu_ativo == "Alterar Cadastro":
             tela_manutencao_funcionarios()
-        elif escolha == "Banco de Horas" and usuario.get("administrador"):
+        elif st.session_state.menu_ativo == "Registros do Ponto":
+            tela_periodo_trabalhado_adm()
+        elif st.session_state.menu_ativo == "Manutenção do Ponto":
+            tela_registro_ponto_manual()
+        elif st.session_state.menu_ativo == "Banco de Horas":
             tela_banco_horas_admin()
-        elif escolha == "Ferias Marcadas" and usuario.get("administrador"):
-            ferias_marcadas()
-        elif escolha == "Agendamento" and usuario.get("administrador"):
-            add_evento()
-        elif escolha == "Agendar Ferias" and usuario.get("administrador"):
+        elif st.session_state.menu_ativo == "Registro de Faltas":
+            tela_admin_faltas()
+        elif st.session_state.menu_ativo == "Manutenção de Senha":
+            tela_alterar_senha_admin()
+
+        elif st.session_state.menu_ativo == "Agendar Férias":
             exibir_formulario_ferias()
-        elif escolha == "Cadastrar Funcionário":
-            st.warning("Acesso restrito! Apenas administradores podem acessar.")
-        elif escolha == "Sair":
+        elif st.session_state.menu_ativo == "Férias Marcadas":
+            ferias_marcadas()
+        elif st.session_state.menu_ativo == "Agendamento":
+            add_evento()
+
+        # 🔹 Botão de saída SEMPRE visível no sidebar
+        if st.sidebar.button("Sair", use_container_width=True):
             st.session_state.clear()
-            st.success("Sessão encerrada!")
+            st.sidebar.success("Sessão encerrada!")
             st.rerun()
+
+
 
 def tela_login():
     logo = "C:\\Users\\Jarvis\\Documents\\Projetos\\Ponto\\logo-dna.png"
@@ -127,25 +206,29 @@ def tela_login():
 
         if submit_button:
             conn = conexao_persistente
+            username = username.strip()
             if conn:
                 cursor = conexao_persistente.cursor()
                 cursor.execute("""
-                    SELECT id, nome, cargo, administrador, senha
+                    SELECT id, nome, cargo, administrador, agendamento,edita_ponto, senha
                     FROM funcionarios
-                    WHERE username = ?
+                    WHERE username = %s
                 """, (username,))
+
                 usuario = cursor.fetchone()
 
                 if usuario:
                     # Verifica se o hash da senha fornecida corresponde ao armazenado
                     senha_hash = gerar_hash_senha(senha)  # Gera o hash da senha inserida
-                    if usuario[4] == senha_hash:
+                    if usuario[6] == senha_hash:
                         st.session_state["usuario"] = {
                             "id": usuario[0],
                             "nome": usuario[1],
                             "cargo": usuario[2],
-                            "administrador": bool(usuario[3])
-                        }
+                            "administrador": usuario[3] == '1',
+                            "agendamento": usuario[4] == '1',
+                            "edita_ponto": usuario[5] == '1',
+                                                }
                         st.success(f"Bem-vindo, {usuario[1]}!")
                         st.rerun()
                     else:
@@ -161,7 +244,7 @@ def listar_usuarios():
         return []
     try:
         cursor = conexao_persistente.cursor()
-        cursor.execute("SELECT ID, NOME, USERNAME FROM FUNCIONARIOS")
+        cursor.execute("""SELECT ID, NOME, USERNAME, EMAIL, DTCONTRATACAO, ADMINISTRADOR, AGENDAMENTO, EDITA_PONTO FROM FUNCIONARIOS ORDER BY 2""")
         usuarios = cursor.fetchall()
         return usuarios
     except Exception as e:
@@ -169,13 +252,15 @@ def listar_usuarios():
         return []
 
 
+
 def alterar_senha_usuario(usuario_id, nova_senha):
     """Atualiza a senha do usuário no banco de dados."""
     senha_criptografada = criptografar_senha(nova_senha)
     cursor = conexao_persistente.cursor()
-    cursor.execute("UPDATE FUNCIONARIOS SET SENHA = ? WHERE ID = ?", (senha_criptografada, usuario_id))
+    cursor.execute("UPDATE FUNCIONARIOS SET SENHA = %s WHERE ID = %s", (senha_criptografada, usuario_id))
     conexao_persistente.commit()
     st.success("Senha alterada com sucesso!")
+
 
 def tela_alterar_senha_admin():
     st.markdown("<h1 style='text-align: center;'>Alterar Senha de Usuários</h1>", unsafe_allow_html=True)
@@ -186,22 +271,35 @@ def tela_alterar_senha_admin():
         st.warning("Nenhum usuário cadastrado encontrado.")
         return
 
-    # Exibir a lista de usuários
-    for usuario in usuarios:
-        id_usuario, nome, username = usuario
-        with st.expander(f"{nome} ({username})"):
-            with st.form(key=f"form_usuario_{id_usuario}"):
-                nova_senha = st.text_input("Digite a nova senha", type="password", key=f"senha_{id_usuario}")
-                confirmar_senha = st.text_input("Confirme a nova senha", type="password", key=f"confirmar_{id_usuario}")
-                alterar = st.form_submit_button("Alterar Senha")
+    # Criar um DataFrame para facilitar o uso
+    df_usuarios = pd.DataFrame(usuarios, columns=["ID", "Nome", "Username", "Email", "DtContratacao", "Administrador", "Agendamento","edita_ponto"])
 
-                if alterar:
-                    if not nova_senha or not confirmar_senha:
-                        st.error("Por favor, preencha os dois campos de senha.")
-                    elif nova_senha != confirmar_senha:
-                        st.error("As senhas não coincidem. Tente novamente.")
-                    else:
-                        alterar_senha_usuario(id_usuario, nova_senha)
+    # Selectbox para escolher o usuário
+    nomes_usuarios = df_usuarios["Nome"].tolist()
+    usuario_selecionado = st.selectbox("Selecione um usuário para alterar a senha", options=nomes_usuarios)
+
+    # Obter o ID do usuário selecionado
+    usuario_info = df_usuarios[df_usuarios["Nome"] == usuario_selecionado].iloc[0]
+    id_usuario = usuario_info["ID"]
+
+    # Formulário para alterar a senha
+    with st.form(key=f"form_usuario_{id_usuario}"):
+        nova_senha = st.text_input("Digite a nova senha", type="password", key=f"senha_{id_usuario}")
+        confirmar_senha = st.text_input("Confirme a nova senha", type="password", key=f"confirmar_{id_usuario}")
+        alterar = st.form_submit_button("Alterar Senha", use_container_width=True)
+
+        if alterar:
+            if not nova_senha or not confirmar_senha:
+                st.error("Por favor, preencha os dois campos de senha.")
+            elif nova_senha != confirmar_senha:
+                st.error("As senhas não coincidem. Tente novamente.")
+            else:
+                try:
+                    alterar_senha_usuario(id_usuario, nova_senha)
+                    st.success(f"Senha do usuário {usuario_selecionado} alterada com sucesso!")
+                except Exception as e:
+                    st.error(f"Erro ao alterar a senha: {e}")
+
 
 
 # Função para formatar horário
@@ -231,7 +329,7 @@ def obter_registros(funcionario_id, data_inicio, data_fim):
     cursor = conexao_persistente.cursor()
     try:
         # Busca informações do funcionário
-        cursor.execute("SELECT NOME, CARGO, DTCADASTRO FROM FUNCIONARIOS WHERE ID = ?", (funcionario_id,))
+        cursor.execute("SELECT NOME, CARGO, DTCADASTRO FROM FUNCIONARIOS WHERE ID = %s", (funcionario_id,))
         funcionario = cursor.fetchone()
 
         if not funcionario:
@@ -244,7 +342,7 @@ def obter_registros(funcionario_id, data_inicio, data_fim):
         cursor.execute("""
             SELECT DATA, CHEGADA, SAIDA_ALMOCO, RETORNO_ALMOCO, SAIDA 
             FROM REGISTROS 
-            WHERE FUNCIONARIO_ID = ? AND DATA BETWEEN ? AND ?
+            WHERE FUNCIONARIO_ID = %s AND DATA BETWEEN %s AND %s
             ORDER BY DATA
         """, (funcionario_id, data_inicio, data_fim))
         registros = cursor
@@ -312,9 +410,25 @@ def obter_registros(funcionario_id, data_inicio, data_fim):
         return None, None, None, pd.DataFrame()
     finally:
         ''
+#Cadastro da empresa
+def carregar_dados_empresa():
+    caminho_arquivo = Path("empresa.json")
+    if not caminho_arquivo.exists():
+        raise FileNotFoundError("O arquivo 'empresa.json' não foi encontrado na raiz do projeto.")
+    
+    with open(caminho_arquivo, "r", encoding="utf-8") as arquivo:
+        return json.load(arquivo)
 
 # Função para gerar PDF
 def gerar_pdf(nome, cargo, dtcadastro, df):
+
+    # Carregar informações da empresa do arquivo JSON
+    try:
+        dados_empresa = carregar_dados_empresa()
+    except FileNotFoundError as e:
+        print(e)
+        return
+        
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=5)
     pdf.set_top_margin(0)
@@ -332,10 +446,10 @@ def gerar_pdf(nome, cargo, dtcadastro, df):
     x_start = pdf.get_x()
     y_start = pdf.get_y()
     pdf.multi_cell(100, 5, 
-                   "Empresa: G2 E SA SOLUCOES EM INFORMATICA LTDA\n"
-                   "CNPJ/CPF: 39.417.670/0001-43\n"
-                   "Endereço: GETULIO VARGAS\n"
-                   "Cidade/UF: SANTO ANTONIO DE PADUA - RJ", 
+                    f"Empresa: {dados_empresa['nome']}\n"
+                    f"CNPJ/CPF: {dados_empresa['cnpj']}\n"
+                    f"Endereço: {dados_empresa['endereco']}\n"
+                    f"Cidade/UF: {dados_empresa['cidade']} - {dados_empresa['uf']}",                   
                    border=1)
     
     # Segunda coluna: informações do funcionário (texto alinhado à direita)
@@ -343,7 +457,7 @@ def gerar_pdf(nome, cargo, dtcadastro, df):
     pdf.multi_cell(90, 5, 
                    f"136 - {nome}\n"
                    f"Função: 007 - {cargo}\n"
-                   f"Admissão: {dtcadastro.strftime('%d/%m/%Y')}\n"
+                   f"Admissão: {dtcadastro.strftime('%d/%m/%Y') if dtcadastro else 'Não informado'}\n"
                    f"Horário: 08:00 - 11:00 - 12:00 - 17:00", 
                    border=1, align="R")
     #pdf.ln(10)
@@ -450,6 +564,197 @@ def tela_periodo_trabalhado():
     else:
         st.warning("Nenhum registro encontrado no período selecionado.")
 
+###
+##
+def tela_periodo_trabalhado_adm():
+    """Tela principal para exibição do relatório de ponto."""
+    if "usuario" not in st.session_state:
+        st.warning("Faça login para acessar esta área.")
+        return
+
+    # Conexão com o banco de dados
+    conn = conexao_persistente
+    if not conn:
+        st.error("Erro ao conectar ao banco de dados.")
+        return
+
+    cursor = conn.cursor()
+    cursor.execute("ROLLBACK")
+
+    # Título e instruções
+    st.markdown("<h1 style='text-align: center;'>Relatório de Ponto</h1>", unsafe_allow_html=True)
+    st.write("Selecione o período desejado para exibir os registros de ponto:")
+
+
+    # Obter lista de funcionários
+    cursor.execute("SELECT ID, NOME FROM FUNCIONARIOS ORDER BY NOME")
+    funcionarios = cursor.fetchall()
+    opcoes_funcionarios = {f"{nome}": id_func for id_func, nome in funcionarios}
+
+    # Seleção do funcionário
+    funcionario_selecionado = st.selectbox("Selecione o Funcionário:", options=opcoes_funcionarios.keys())
+
+    if not funcionario_selecionado:
+        st.warning("Selecione um funcionário para continuar.")
+        return
+
+    funcionario_id = opcoes_funcionarios[funcionario_selecionado]
+
+    # Seleção de período
+    col1, col2 = st.columns(2)
+    with col1:
+        primeiro_dia_mes = datetime(datetime.now().year, datetime.now().month, 1)
+        data_inicio = st.date_input("Data de início", value=primeiro_dia_mes, format="DD/MM/YYYY")
+    with col2:
+        data_fim = st.date_input("Data de fim", value=datetime.now(), format="DD/MM/YYYY")
+
+    if data_inicio > data_fim:
+        st.error("A data de início não pode ser maior que a data de fim.")
+        return
+
+    # Obter registros do funcionário selecionado
+    nome, cargo, dtcadastro, df = obter_registros(funcionario_id, data_inicio, data_fim)
+
+    if not df.empty:
+        col1, col2 = st.columns(2)
+
+        with col1:
+            # Gerar PDF do funcionário selecionado
+            pdf_file = gerar_pdf(nome, cargo, dtcadastro, df)
+            with open(pdf_file, "rb") as f:
+                st.download_button(
+                    label="Baixar Registro do Funcionario Filtrado",
+                    data=f,
+                    file_name=f"Relatorio_Ponto_{nome.replace(' ', '_')}.pdf",
+                    mime="application/pdf",use_container_width=True
+                )
+            os.remove(pdf_file)  # Remover arquivo temporário
+
+        with col2:
+            if st.button("Solicitar de Todos os Funcionários",use_container_width=True):
+                # Consultar registros de todos os funcionários no período selecionado
+                cursor.execute("""
+                    SELECT FUNC.ID, FUNC.NOME, FUNC.CARGO, FUNC.DTCADASTRO, REG.DATA, REG.CHEGADA, REG.SAIDA_ALMOCO, REG.RETORNO_ALMOCO, REG.SAIDA
+                    FROM REGISTROS REG
+                    JOIN FUNCIONARIOS FUNC ON REG.FUNCIONARIO_ID = FUNC.ID
+                    WHERE REG.DATA BETWEEN %s AND %s
+                    ORDER BY FUNC.ID, REG.DATA
+                """, (data_inicio, data_fim))
+                registros = cursor.fetchall()
+
+                if registros:
+                    # Agrupar os registros por funcionário
+                    funcionarios_registros = {}
+                    for registro in registros:
+                        funcionario_id = registro[0]
+                        if funcionario_id not in funcionarios_registros:
+                            funcionarios_registros[funcionario_id] = {
+                                "nome": registro[1],
+                                "cargo": registro[2],
+                                "admissao": registro[3],
+                                "registros": []
+                            }
+                        funcionarios_registros[funcionario_id]["registros"].append(registro[4:])
+
+                    # Criar PDFs individuais para cada funcionário e armazená-los em um arquivo ZIP
+                    zip_buffer = BytesIO()
+                    with ZipFile(zip_buffer, "w") as zip_file:
+                        for funcionario_id, dados in funcionarios_registros.items():
+                            # Criar DataFrame para os registros do funcionário
+                            registros_df = pd.DataFrame(
+                                dados["registros"],
+                                columns=["Data", "Chegada", "Saída Almoço", "Retorno Almoço", "Saída"]
+                            )
+
+                            # Gerar um range de datas para incluir todos os dias no período
+                            todas_as_datas = pd.date_range(start=data_inicio, end=data_fim)
+                            datas_df = pd.DataFrame({"Data": todas_as_datas})
+
+                            # Mesclar para garantir que todos os dias estejam presentes
+                            registros_df["Data"] = pd.to_datetime(registros_df["Data"], errors='coerce')
+                            registros_completos = datas_df.merge(
+                                registros_df,
+                                on="Data",
+                                how="left"
+                            )
+
+                            # Substituir valores nulos por vazio (campo em branco)
+                            registros_completos.fillna("", inplace=True)
+
+                            # Adicionar a coluna "Data e Dia" com nomes de dias em português (abreviados)
+                            registros_completos["Data e Dia"] = registros_completos["Data"].dt.strftime("%d/%m/%Y (%a)")
+                            registros_completos["Data e Dia"] = registros_completos["Data e Dia"].replace({
+                                "Mon": "Seg",
+                                "Tue": "Ter",
+                                "Wed": "Qua",
+                                "Thu": "Qui",
+                                "Fri": "Sex",
+                                "Sat": "Sab",
+                                "Sun": "Dom"
+                            }, regex=True)
+
+                            # Formatar horários para hh:mm:ss
+                            for coluna in ["Chegada", "Saída Almoço", "Retorno Almoço", "Saída"]:
+                                registros_completos[coluna] = registros_completos[coluna].apply(
+                                    lambda x: x.strftime("%H:%M:%S") if isinstance(x, time) else x
+                                )
+
+                            # Gerar PDF para o funcionário
+                            pdf_file = gerar_pdf(
+                                dados["nome"],
+                                dados["cargo"],
+                                dados["admissao"],
+                                registros_completos
+                            )
+
+                            # Adicionar o PDF ao arquivo ZIP
+                            with open(pdf_file, "rb") as f:
+                                zip_file.writestr(f"Relatorio_Ponto_{dados['nome'].replace(' ', '_')}.pdf", f.read())
+                            os.remove(pdf_file)  # Remover arquivo temporário
+
+                    # Fornecer o arquivo ZIP como download imediato
+                    zip_buffer.seek(0)
+                    st.download_button(
+                        label="Baixar",
+                        data=zip_buffer,
+                        file_name="Relatorios_Ponto_Todos_Funcionarios.zip",
+                        mime="application/zip",use_container_width=True
+                    )
+                else:
+                    st.warning("Nenhum registro encontrado no período selecionado.")
+
+
+def verificar_restricoes_ponto(cursor, usuario_id):
+    """Verifica se o usuário está de férias ou já tem uma falta registrada no dia."""
+    data_atual = datetime.now().date()
+
+    # Verificar se o usuário está de férias
+    cursor.execute("""
+        SELECT COUNT(*) 
+        FROM FERIAS 
+        WHERE FUNCIONARIO_ID = %s AND %s BETWEEN DATA_INICIO AND DATA_FIM
+    """, (usuario_id, data_atual))
+    esta_de_ferias = cursor.fetchone()[0] > 0
+
+    # Verificar se já há uma falta registrada para o usuário
+    cursor.execute("""
+        SELECT COUNT(*) 
+        FROM FALTAS 
+        WHERE FUNCIONARIO_ID = %s AND DATA = %s
+    """, (usuario_id, data_atual))
+    falta_registrada = cursor.fetchone()[0] > 0
+
+    if esta_de_ferias:
+        st.error("Você está de férias e não pode registrar o ponto.")
+        return False
+    elif falta_registrada:
+        st.error("Você já possui uma falta registrada para hoje. Não é possível bater o ponto.")
+        return False
+
+    return True
+
+#Tela para o Registro do ponto
+
 def tela_funcionario():
     if "usuario" not in st.session_state:
         st.warning("Faça login para acessar esta área.")
@@ -457,90 +762,268 @@ def tela_funcionario():
 
     usuario = st.session_state["usuario"]
 
-    # Supondo que usuario['nome'] contenha o nome completo
     nome_completo = usuario['nome']
     primeiro_nome, primeiro_sobrenome = nome_completo.split()[:2]
-
-    # Exibir no Streamlit
-    st.markdown(
-        f"<h1 style='text-align: center;font-size: 40px;'>Olá, {primeiro_nome} {primeiro_sobrenome}!</h1>", 
-        unsafe_allow_html=True
-    )
-    
-    #st.markdown(f"<h1 style='text-align: center;'>Olá, {usuario['nome']}!</h1>", unsafe_allow_html=True)
+    st.markdown(f"<h1 style='text-align: center;font-size: 40px;'>Olá, {primeiro_nome} {primeiro_sobrenome}!</h1>", unsafe_allow_html=True)
     st.write('______________________________________________')
 
-    def registrar_ponto(tipo, cursor):
-        data_atual = datetime.now().date()
-        hora_atual = datetime.now().time()
 
-        # Verificar se o ponto já foi registrado
-        cursor.execute(f"""
-            SELECT {tipo}
-            FROM REGISTROS
-            WHERE FUNCIONARIO_ID = ? AND DATA = ?
-        """, (usuario["id"], data_atual))
-        registro = cursor.fetchone()
-
-        placeholder = st.empty()  # Espaço reservado para a mensagem
-        if registro and registro[0]:
-            placeholder = st.empty() 
-            placeholder.warning(f"Já registrado!", icon="⚠️")
-            tm.sleep(1)
-            placeholder.empty()
+    # Carregar feriados de um arquivo externo
+    def carregar_feriados():
+        caminho_feriados = Path("feriados.json")
+        if caminho_feriados.exists():
+            with open(caminho_feriados, "r", encoding="utf-8") as f:
+                return [datetime.strptime(data, "%Y-%m-%d").date() for data in json.load(f)]
         else:
-            cursor.execute(f"""
-                UPDATE OR INSERT INTO REGISTROS (FUNCIONARIO_ID, DATA, {tipo})
-                VALUES (?, ?, ?)
-                MATCHING (FUNCIONARIO_ID, DATA)
-            """, (usuario["id"], data_atual, hora_atual))
+            st.error("Arquivo de feriados não encontrado. Por favor, crie um arquivo 'feriados.json'.")
+            return []
 
-            # Processar horas extras se for a saída
-            if tipo == "SAIDA":
-                cursor.execute("""
-                    SELECT CHEGADA, SAIDA_ALMOCO, RETORNO_ALMOCO, SAIDA
-                    FROM REGISTROS
-                    WHERE FUNCIONARIO_ID = ? AND DATA = ?
-                """, (usuario["id"], data_atual))
-                registros = cursor.fetchone()
+    feriados = carregar_feriados()
 
-                if registros and registros[0] and registros[3]:
-                    calcular_horas_extras(cursor, registros, data_atual, usuario["id"])
+    def verificar_ausencias(cursor):
+        data_atual = datetime.now().date()
 
-            conn.commit()
-            placeholder = st.empty() 
-            placeholder.success(f"Registrado!", icon="✅")
-            tm.sleep(1)
-            placeholder.empty()
+        # 🔍 Buscar o último dia que o funcionário bateu ponto
+        cursor.execute("""
+            SELECT MAX(DATA)
+            FROM REGISTROS
+            WHERE FUNCIONARIO_ID = %s
+        """, (usuario["id"],))
+        ultimo_ponto = cursor.fetchone()[0]
+
+        if not ultimo_ponto:
+            st.error("Não foi possível obter o último registro de ponto.")
+            return False
+
+        # 📅 Gerar os dias a partir do último registro até ONTEM
+        dias_faltantes = []
+        for i in range((data_atual - ultimo_ponto).days):
+            dia = ultimo_ponto + timedelta(days=i + 1)
+
+            # 🔹 Ignorar finais de semana e feriados
+            if dia.weekday() >= 5 or dia in feriados:
+                continue
+
+            # 🔹 Ignorar o dia atual (pois o funcionário ainda pode registrar o ponto)
+            if dia == data_atual:
+                continue  
+
+            # 🔹 Verificar se o ponto já foi registrado nesse dia
+            cursor.execute("""
+                SELECT 1
+                FROM REGISTROS
+                WHERE FUNCIONARIO_ID = %s AND DATA = %s
+            """, (usuario["id"], dia))
+            registro_existe = cursor.fetchone()
+
+            # 🔹 Verificar se já há uma falta registrada nesse dia
+            cursor.execute("""
+                SELECT 1
+                FROM FALTAS
+                WHERE FUNCIONARIO_ID = %s AND DATA = %s
+            """, (usuario["id"], dia))
+            falta_existe = cursor.fetchone()
+
+            # 🔹 Verificar se o funcionário estava de férias nesse dia
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM FERIAS
+                WHERE FUNCIONARIO_ID = %s AND %s BETWEEN DATA_INICIO AND DATA_FIM
+            """, (usuario["id"], dia))
+            esta_de_ferias = cursor.fetchone()[0] > 0
+
+            # 🔥 Se não há registro, falta ou férias, então é uma ausência
+            if not registro_existe and not falta_existe and not esta_de_ferias:
+                dias_faltantes.append(dia)
+
+        # 🔹 Se houver faltas não justificadas, solicitar justificativa
+        for data in sorted(dias_faltantes):
+            justificativa_key = f"justificativa_{data}"
+            if justificativa_key not in st.session_state:
+                st.session_state[justificativa_key] = False
+
+            if not st.session_state[justificativa_key]:
+                st.warning(f"Você não registrou ponto no dia {data.strftime('%d/%m/%Y')}. Justifique a ausência")
+                justificativa = st.text_area(f"Informe a justificativa para a falta no dia {data.strftime('%d/%m/%Y')} (mínimo 15 caracteres):", key=f"falta_{data}")
+                documento = st.file_uploader(f"Anexe um documento para comprovar a ausência no dia {data.strftime('%d/%m/%Y')} (opcional):", type=["pdf"], key=f"anexo_{data}")
+
+                if st.button("Salvar Justificativa", key=f"salvar_justificativa_{data}"):
+                    if len(justificativa) < 15:
+                        st.error("A justificativa deve ter no mínimo 15 caracteres.")
+                    else:
+                        documento_blob = None
+                        if documento:
+                            documento_blob = documento.read()
+
+                        cursor.execute("""
+                            INSERT INTO FALTAS (FUNCIONARIO_ID, DATA, HORA, JUSTIFICATIVA, DOCUMENTO)
+                            VALUES (%s, %s, %s, %s, %s)
+                        """, (usuario["id"], data, datetime.now().time(), justificativa, documento_blob))
+                        conn.commit()
+
+                        st.success("Justificativa salva com sucesso!")
+                        st.session_state[justificativa_key] = True
+                        st.rerun()
+
+        if any(not st.session_state.get(f"justificativa_{data}", False) for data in dias_faltantes):
+            return False
+
+        return True
+
+
 
     def calcular_horas_extras(cursor, registros, data_atual, funcionario_id):
-        chegada = datetime.combine(data_atual, registros[0])
-        saida = datetime.combine(data_atual, registros[3])
+        chegada = datetime.combine(data_atual, registros[0]) if registros and registros[0] else None
+        saida = datetime.combine(data_atual, datetime.now().time()) if registros[3] is None else datetime.combine(data_atual, registros[3])
         intervalo_almoco = timedelta()
 
         if registros[1] and registros[2]:  # Verificar se há almoço registrado
             intervalo_almoco = datetime.combine(data_atual, registros[2]) - datetime.combine(data_atual, registros[1])
 
         total_horas = saida - chegada - intervalo_almoco
-        limite_horas = timedelta(hours=8, minutes=40)
+        limite_horas = timedelta(hours=8, minutes=40)  # Jornada padrão (8h40min)
+        
+        # Definição do horário limite para tolerância de saída (18:10)
+        horario_saida_padrao = datetime.combine(data_atual, time(18, 0))  # 18:00
+        horario_saida_tolerancia = horario_saida_padrao + timedelta(minutes=10)  # 18:10
 
-        if total_horas > limite_horas:
+        if saida > horario_saida_tolerancia:  # Apenas se passar das 18:10
             horas_extras = total_horas - limite_horas
-            # Formatando horas extras para "HH:MM:SS"
-            horas_extras_time = f"{horas_extras.seconds // 3600:02}:{(horas_extras.seconds // 60) % 60:02}:{horas_extras.seconds % 60:02}"
-            cursor.execute("""
-                UPDATE REGISTROS
-                SET HORAEXTRA = ?
-                WHERE FUNCIONARIO_ID = ? AND DATA = ?
-            """, (horas_extras_time, funcionario_id, data_atual))
+            if horas_extras > timedelta(0):  # Apenas registra se houver hora extra positiva
+                horas_extras_time = f"{horas_extras.seconds // 3600:02}:{(horas_extras.seconds // 60) % 60:02}:{horas_extras.seconds % 60:02}"
+                cursor.execute(
+                    """
+                    UPDATE REGISTROS
+                    SET HORAEXTRA = %s
+                    WHERE FUNCIONARIO_ID = %s AND DATA = %s
+                    """, (horas_extras_time, funcionario_id, data_atual)
+                )
+                conn.commit()
 
 
-    # Criar uma conexão persistente
+    def registrar_ponto(tipo, cursor):
+        data_atual = datetime.now().date()
+        hora_atual = datetime.now().time()
+
+        cursor.execute(
+            """
+            SELECT CHEGADA, SAIDA_ALMOCO, RETORNO_ALMOCO, SAIDA
+            FROM REGISTROS
+            WHERE FUNCIONARIO_ID = %s AND DATA = %s
+            """, (usuario["id"], data_atual)
+        )
+        registros = cursor.fetchone()
+
+        chegada = registros[0] if registros else None
+        saida_almoco = registros[1] if registros else None
+        retorno_almoco = registros[2] if registros else None
+        saida = registros[3] if registros else None
+
+        if tipo == "SAIDA_ALMOCO" and not chegada:
+            placeholder = st.empty() 
+            placeholder.error("Chegada não registrada!")
+            tm.sleep(2)
+            placeholder.empty()
+            return
+
+        if tipo == "RETORNO_ALMOCO" and not saida_almoco:
+            placeholder = st.empty() 
+            placeholder.error("Saída do almoço não registrada!")
+            tm.sleep(2)
+            placeholder.empty()
+            return
+
+        if tipo == "SAIDA" and not retorno_almoco and saida_almoco:
+            placeholder = st.empty() 
+            placeholder.error("Chegada não registrada!")
+            tm.sleep(2)
+            placeholder.empty()
+            return
+
+        if tipo == "SAIDA":
+            chegada = datetime.combine(data_atual, registros[0]) if registros and registros[0] else None
+            saida = datetime.combine(data_atual, hora_atual)
+
+            # Definição do horário limite para tolerância de saída (18:10)
+            horario_saida_padrao = datetime.combine(data_atual, time(18, 0))  # 18:00
+            horario_saida_tolerancia = horario_saida_padrao + timedelta(minutes=10)  # 18:10
+
+            if "dialog_open" not in st.session_state:
+                st.session_state.dialog_open = True
+
+            if chegada and saida > horario_saida_tolerancia:  # Só verifica justificativa se ultrapassar 18:10
+                @st.dialog("Justificativa para Hora Extra")
+                def dialog_justificativa():
+                    st.write("Você excedeu o limite de horas diárias. Por favor, informe a justificativa para as horas extras.")
+                    justificativa = st.text_area("Justificativa (mínimo 15 caracteres):", key="justificativa_hora_extra")
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Confirmar", use_container_width=True):
+                            if len(justificativa) < 15:
+                                st.error("A justificativa deve ter no mínimo 15 caracteres.")
+                                return
+                            else:
+                                cursor.execute("""
+                                    INSERT INTO registros (funcionario_id, data, justificativahoraextra, saida)
+                                    VALUES (%s, %s, %s, %s)
+                                    ON CONFLICT (funcionario_id, data)  -- 🔹 Define as colunas que podem gerar conflito
+                                    DO UPDATE SET 
+                                        justificativahoraextra = EXCLUDED.justificativahoraextra, 
+                                        saida = EXCLUDED.saida;
+                                """, (usuario["id"], data_atual, justificativa, hora_atual))
+
+                                conn.commit()
+
+                                calcular_horas_extras(cursor, registros, data_atual, usuario["id"])
+                                st.success("Justificativa registrada e saída registrada com sucesso!")
+                                st.rerun()
+
+                    with col2:
+                        if st.button("Cancelar", use_container_width=True):
+                            st.warning("Registro de saída cancelado.")
+                            st.session_state.dialog_open = False
+                            st.rerun()
+
+                dialog_justificativa()
+                return
+
+        cursor.execute(
+            f"""
+            SELECT {tipo}
+            FROM REGISTROS
+            WHERE FUNCIONARIO_ID = %s AND DATA = %s
+            """, (usuario["id"], data_atual)
+        )
+        registro = cursor.fetchone()
+
+        if registro and registro[0]:
+            placeholder = st.empty()
+            placeholder.warning(f"Já registrado!", icon="⚠️")
+            tm.sleep(1)
+            placeholder.empty()
+        else:
+            cursor.execute(f"""
+                INSERT INTO registros (funcionario_id, data, {tipo})
+                VALUES (%s, %s, %s)
+                ON CONFLICT (funcionario_id, data)
+                DO UPDATE SET {tipo} = EXCLUDED.{tipo};
+            """, (usuario["id"], data_atual, hora_atual))
+
+            conn.commit()
+            placeholder = st.empty()
+            placeholder.success(f"Registrado!", icon="✅")
+            tm.sleep(1)
+            placeholder.empty()
+
+    
+
     conn = conexao_persistente
     if conn:
         cursor = conexao_persistente.cursor()
 
-        # Botões para registrar pontos
+        if not verificar_ausencias(cursor) or (not verificar_restricoes_ponto(cursor, usuario["id"])):
+            return        
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             if st.button("Chegada", use_container_width=True):
@@ -554,11 +1037,7 @@ def tela_funcionario():
         with col4:
             if st.button("Saída", use_container_width=True):
                 registrar_ponto("SAIDA", cursor)
-    #st.write('______________________________________________')
-    #st.divider()
-    #st.markdown("""<hr style="height:10px;border:none;color:#333;background-color:#333;" /> """, unsafe_allow_html=True)
 
-    conn = conexao_persistente
     if conn:
         cursor = conexao_persistente.cursor()
         data_atual = datetime.now().date()
@@ -566,52 +1045,165 @@ def tela_funcionario():
         cursor.execute("""
             SELECT CHEGADA, SAIDA_ALMOCO, RETORNO_ALMOCO, SAIDA
             FROM REGISTROS
-            WHERE FUNCIONARIO_ID = ? AND DATA = ?
+            WHERE FUNCIONARIO_ID = %s AND DATA = %s
         """, (usuario["id"], data_atual))
         registros = cursor.fetchone()
 
+        #exibindo os registros
+        if registros:
+            st.markdown("<h1 style='text-align: center; font-size: 40px;'>Registros de Hoje:</h1>", unsafe_allow_html=True)
+            data_atual = datetime.now().strftime("%Y-%m-%d")
+            df = pd.DataFrame([registros] ,columns=["Chegada", "Saída Almoço", "Retorno Almoço", "Saída"])
+            df = df.fillna("Não registrado")
+
+            for col in ["Chegada", "Saída Almoço", "Retorno Almoço", "Saída"]:
+                df[col] = df[col].apply(
+                    lambda x: pd.to_datetime(f"{data_atual} {x}", errors='coerce').strftime("%H:%M:%S") 
+                    if x != "Não registrado" else x
+                )
+
+            st.dataframe(df,hide_index=True ,use_container_width=True)
+            if registros[0] != "Não registrado":
+                # Formatar a hora de chegada para datetime
+                hora_chegada = pd.to_datetime(f"{data_atual} {registros[0]}")
+
+                # Se a hora de saída não estiver registrada ou for inválida, usa a hora atual
+                if registros[3] != "Não registrado" and registros[3]:
+                    try:
+                        hora_saida = pd.to_datetime(f"{data_atual} {registros[3]}")
+                    except Exception as e:
+                        st.warning(f"Erro ao processar a hora de saída: {e}. Usando hora atual.")
+                        hora_saida = datetime.now()
+                else:
+                    hora_saida = datetime.now()
+
+                # Calcular a diferença
+                total_horas = hora_saida - hora_chegada
+
+                # Formatando para exibir apenas HH:mm:ss, mesmo que ultrapasse 24 horas
+                total_segundos = int(total_horas.total_seconds())
+                horas, resto = divmod(total_segundos, 3600)
+                minutos, segundos = divmod(resto, 60)
+                total_horas_formatado = f"{horas:02}:{minutos:02}:{segundos:02}"
+
+                st.markdown(f"**Total de horas trabalhadas:** {total_horas_formatado}")
+            else:
+                st.warning("Chegada não registrada para calcular as horas trabalhadas.")
+
+
+
+#Manutenção do ponto caso o funcionário não esqueça de registrar o ponto
+def tela_registro_ponto_manual():
+    st.markdown("<h1 style='text-align: center;'>Registro de Ponto Manual</h1>", unsafe_allow_html=True)
+
+    # Conexão com o banco de dados
+    conn = conexao_persistente
+    if not conn:
+        st.error("Não foi possível conectar ao banco de dados.")
+        return
+
+    cursor = conn.cursor()
+    cursor.execute("ROLLBACK")
+
+    # Selecionar funcionário
+    cursor.execute("SELECT ID, NOME FROM FUNCIONARIOS ORDER BY NOME")
+    funcionarios = cursor.fetchall()
+    opcoes_funcionarios = {f"{nome}": id_func for id_func, nome in funcionarios}
+
+    funcionario_selecionado = st.selectbox("Selecione o Funcionário:", options=opcoes_funcionarios.keys())
+
+    if not funcionario_selecionado:
+        st.warning("Selecione um funcionário para continuar.")
+        return
+
+    funcionario_id = opcoes_funcionarios[funcionario_selecionado]
+
+    # Selecionar data do registro
+    data_selecionada = st.date_input("Selecione a data do registro:", datetime.now().date(), format="DD/MM/YYYY")
+
+    # Verificar se o funcionário já tem registro de férias ou falta na data
+    cursor.execute("""
+        SELECT COUNT(*) FROM FERIAS
+        WHERE FUNCIONARIO_ID = %s AND %s BETWEEN DATA_INICIO AND DATA_FIM
+    """, (funcionario_id, data_selecionada))
+    esta_de_ferias = cursor.fetchone()[0] > 0
+
+    cursor.execute("""
+        SELECT COUNT(*) FROM FALTAS
+        WHERE FUNCIONARIO_ID = %s AND DATA = %s
+    """, (funcionario_id, data_selecionada))
+    falta_registrada = cursor.fetchone()[0] > 0
+
+    if esta_de_ferias:
+        st.warning("Este funcionário está de férias na data selecionada e não pode registrar ponto.")
+        return
+
+    if falta_registrada:
+        st.warning("Este funcionário já possui uma falta registrada para a data selecionada e não pode registrar presença.")
+        return
+
+    # Função para registrar o ponto manualmente
+    def registrar_ponto_manual(tipo, cursor):
+        hora_atual = st.time_input(f"{tipo}:", key=f"hora_{tipo}")
+
+        if st.button(f"{tipo}", key=f"registrar_{tipo}", use_container_width=True):
+            # Verificar se o registro para a data já existe
+            cursor.execute("""
+                SELECT 1 FROM REGISTROS
+                WHERE FUNCIONARIO_ID = %s AND DATA = %s
+            """, (funcionario_id, data_selecionada))
+            registro_existe = cursor.fetchone()
+
+            try:
+                if not registro_existe:
+                    # Inserir novo registro
+                    cursor.execute("""
+                        INSERT INTO REGISTROS (FUNCIONARIO_ID, DATA, """ + tipo + """)
+                        VALUES (%s, %s, %s)
+                    """, (funcionario_id, data_selecionada, hora_atual))
+                else:
+                    # Atualizar registro existente
+                    cursor.execute("""
+                        UPDATE REGISTROS
+                        SET """ + tipo + """ = %s
+                        WHERE FUNCIONARIO_ID = %s AND DATA = %s
+                    """, (hora_atual, funcionario_id, data_selecionada))
+
+                conn.commit()
+                placeholder = st.empty()
+                placeholder.success(f"Registrado!", icon="✅")
+                tm.sleep(1)
+                placeholder.empty()
+            except Exception as e:
+                st.error(f"Erro ao registrar {tipo}: {e}")
+
+    # Botões para registrar pontos
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        registrar_ponto_manual("Chegada", cursor)
+    with col2:
+        registrar_ponto_manual("Saida_Almoco", cursor)
+    with col3:
+        registrar_ponto_manual("Retorno_Almoco", cursor)
+    with col4:
+        registrar_ponto_manual("Saida", cursor)
+
+    # Exibir registros do dia selecionado
+    cursor.execute("""
+        SELECT CHEGADA, SAIDA_ALMOCO, RETORNO_ALMOCO, SAIDA
+        FROM REGISTROS
+        WHERE FUNCIONARIO_ID = %s AND DATA = %s
+    """, (funcionario_id, data_selecionada))
+    registros = cursor.fetchone()
+
     if registros:
-        #st.markdown("<h1 style='text-align: center;'>Registros de Hoje:</h1>", unsafe_allow_html=True)
-        st.markdown("<h1 style='text-align: center; font-size: 40px;'>Registros de Hoje:</h1>", unsafe_allow_html=True)
-        data_atual = datetime.now().strftime("%Y-%m-%d")
-        df = pd.DataFrame([registros] ,columns=["Chegada", "Saída Almoço", "Retorno Almoço", "Saída"])
+        st.markdown("<h2 style='text-align: center;'>Registros do Dia</h2>", unsafe_allow_html=True)
+        df = pd.DataFrame([registros], columns=["Chegada", "Saída Almoço", "Retorno Almoço", "Saída"])
         df = df.fillna("Não registrado")
 
-        for col in ["Chegada", "Saída Almoço", "Retorno Almoço", "Saída"]:
-            df[col] = df[col].apply(
-                lambda x: pd.to_datetime(f"{data_atual} {x}", errors='coerce').strftime("%H:%M:%S") 
-                if x != "Não registrado" else x
-            )
-
-        #df.set_index("Chegada", inplace=True)    
-        #st.dataframe(df, use_container_width=True,)
-        st.dataframe(df,hide_index=True ,use_container_width=True)
-        if registros[0] != "Não registrado":
-            # Formatar a hora de chegada para datetime
-            hora_chegada = pd.to_datetime(f"{data_atual} {registros[0]}")
-
-            # Se a hora de saída não estiver registrada ou for inválida, usa a hora atual
-            if registros[3] != "Não registrado" and registros[3]:
-                try:
-                    hora_saida = pd.to_datetime(f"{data_atual} {registros[3]}")
-                except Exception as e:
-                    st.warning(f"Erro ao processar a hora de saída: {e}. Usando hora atual.")
-                    hora_saida = datetime.now()
-            else:
-                hora_saida = datetime.now()
-
-            # Calcular a diferença
-            total_horas = hora_saida - hora_chegada
-
-            # Formatando para exibir apenas HH:mm:ss, mesmo que ultrapasse 24 horas
-            total_segundos = int(total_horas.total_seconds())
-            horas, resto = divmod(total_segundos, 3600)
-            minutos, segundos = divmod(resto, 60)
-            total_horas_formatado = f"{horas:02}:{minutos:02}:{segundos:02}"
-
-            st.markdown(f"**Total de horas trabalhadas:** {total_horas_formatado}")
-        else:
-            st.warning("Chegada não registrada para calcular as horas trabalhadas.")
+        st.dataframe(df, hide_index=True, use_container_width=True)
+    else:
+        st.info("Nenhum registro encontrado para a data selecionada.")
 
 
 def tela_banco_horas():
@@ -624,16 +1216,16 @@ def tela_banco_horas():
         try:
             # Consulta ajustada para excluir valores nulos
             cursor.execute("""
-                SELECT DATA, HORAEXTRA
+                SELECT DATA, HORAEXTRA,JUSTIFICATIVAHORAEXTRA
                 FROM REGISTROS
-                WHERE FUNCIONARIO_ID = ? AND HORAEXTRA IS NOT NULL
+                WHERE FUNCIONARIO_ID = %s AND HORAEXTRA IS NOT NULL
                 ORDER BY DATA
             """, (usuario["id"],))
             registros = cursor.fetchall()
 
             if registros:
                 # Criando o DataFrame
-                df = pd.DataFrame(registros, columns=["Data", "Hora Extra"])
+                df = pd.DataFrame(registros, columns=["Data", "Hora Extra", "Justifivativa"])
 
                 # Convertendo 'Data' para datetime e formatando como 'dd/mm/yyyy'
                 df["Data"] = pd.to_datetime(df["Data"]).dt.strftime("%d/%m/%Y")
@@ -653,7 +1245,7 @@ def tela_banco_horas():
                 # Definindo a coluna 'Data' como índice
                 #df.set_index("Data", inplace=True)
 
-                st.dataframe(df,hide_index=True ,use_container_width=True)
+                st.dataframe(df,hide_index=True,use_container_width=True)
 
                 # Calculando o total de horas extras
                 total_horas = timedelta()
@@ -812,7 +1404,7 @@ def alterar_senha():
                 cursor.execute("""
                     SELECT senha
                     FROM funcionarios
-                    WHERE id = ?
+                    WHERE id = %s
                 """, (usuario["id"],))
                 registro = cursor.fetchone()
 
@@ -823,17 +1415,44 @@ def alterar_senha():
                     nova_senha_hash = gerar_hash_senha(nova_senha)
                     cursor.execute("""
                         UPDATE funcionarios
-                        SET senha = ?
-                        WHERE id = ?
+                        SET senha = %s
+                        WHERE id = %s
                     """, (nova_senha_hash, usuario["id"]))
                     conn.commit()
                     st.success("Senha alterada com sucesso!")
             else:
                 st.error("Erro ao conectar ao banco de dados.")
 
+
+
+#alterar dados cadastrais dos usuarios
+
+
+# 🔹 Função para limpar entradas inválidas
+def limpar_texto(valor, tipo, max_length):
+    """Remove caracteres inválidos e limita o tamanho do campo"""
+    if not valor:
+        return ""
+
+    if tipo in ["nome", "cargo"]:
+        valor = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ\s]", "", valor)  # Apenas letras e espaços
+    
+    if tipo == "username":
+        valor = re.sub(r"[^A-Za-z0-9]", "", valor)  # Apenas letras e números
+
+    return valor[:max_length]  # Limita o número de caracteres
+
+# 🔹 Validação do email
+def validar_email(valor):
+    """Valida se o email está no formato correto"""
+    if not valor or len(valor) > 100:
+        return False
+    return bool(re.fullmatch(r"^[\w\.-]+@[\w\.-]+\.\w+$", valor))
+
+# 🔹 Função de manutenção de usuários
 def tela_manutencao_funcionarios():
     st.markdown("<h1 style='text-align: center;'>Manutenção de Funcionários</h1>", unsafe_allow_html=True)
-    
+
     # Listar os usuários cadastrados
     usuarios = listar_usuarios()
     if not usuarios:
@@ -841,7 +1460,7 @@ def tela_manutencao_funcionarios():
         return
 
     # Criar um DataFrame para facilitar o filtro
-    df_usuarios = pd.DataFrame(usuarios, columns=["ID", "Nome", "Username"])
+    df_usuarios = pd.DataFrame(usuarios, columns=["ID", "Nome", "Username", "Email", "DtContratacao", "Administrador", "Agendamento", "Edita_ponto"])
 
     # Dropdown para selecionar o funcionário
     funcionarios_unicos = df_usuarios["Nome"].unique()
@@ -855,85 +1474,869 @@ def tela_manutencao_funcionarios():
 
     # Obter os dados do funcionário selecionado
     funcionario = df_filtrado.iloc[0]
-    id_usuario = funcionario["ID"]
+    id_usuario = int(funcionario["ID"])
     nome_atual = funcionario["Nome"]
-    username = funcionario["Username"]
+    email_atual = funcionario["Email"]
+    dt_contratacao_atual = funcionario["DtContratacao"]
 
-    with st.expander(f"Editar dados de {nome_atual} ({username})"):
-        with st.form(f"form_editar_usuario_{id_usuario}"):
-            novo_nome = st.text_input("Nome do Funcionário", value=nome_atual)
-            novo_cargo = st.text_input("Cargo do Funcionário")  # Cargo pode ser carregado do banco se disponível
-            administrador = st.checkbox("Administrador", value=False)  # Atualizar com a flag correta se disponível
+    # 🔹 Converter valores dos checkboxes corretamente ('0' → False, '1' → True)
+    administrador_atual = funcionario["Administrador"] == '1'
+    agendamento_atual = funcionario["Agendamento"] == '1'
+    edita_ponto_atual = funcionario["Edita_ponto"] == '1'
 
-            # Alterar senha com validação
-            st.markdown("### Alterar Senha (opcional)")
-            alterar_senha = st.selectbox(
-                "Deseja alterar a senha?",
-                options=["Não", "Sim"]
-            )
-            if alterar_senha == "Sim":
-                nova_senha = st.text_input("Digite a nova senha", type="password")
-                confirmar_senha = st.text_input("Confirme a nova senha", type="password")
-                if nova_senha != confirmar_senha:
-                    st.error("As senhas não coincidem.")
-            
-            submit_button = st.form_submit_button("Salvar Alterações")
+    # 🔹 Atualizar valores no session_state ao trocar de usuário
+    if "usuario_selecionado" not in st.session_state or st.session_state.usuario_selecionado != funcionario_selecionado:
+        st.session_state.usuario_selecionado = funcionario_selecionado
+        st.session_state.administrador_atual = administrador_atual
+        st.session_state.agendamento_atual = agendamento_atual
+        st.session_state.edita_ponto_atual = edita_ponto_atual
 
-            if submit_button:
+    # Configurar os checkboxes em colunas
+    col1, col2 = st.columns(2)
+
+    with col1:
+        alterar_dados = st.checkbox("Alterar Dados Cadastrais", value=True)
+
+    with col2:
+        alterar_senha = st.checkbox("Alterar Senha", value=False)
+
+    if alterar_dados:
+        with st.form("form_dados_cadastrais"):
+            novo_nome = st.text_input("Nome do Funcionário", value=nome_atual, max_chars=100)
+            novo_cargo = st.text_input("Cargo do Funcionário", max_chars=50)
+            novo_email = st.text_input("Email", value=email_atual, max_chars=100)
+            data_padrao = datetime.today().date()  # Usa a data de hoje como padrão
+            nova_dt_contratacao = st.date_input("Data de Contratação", format='DD/MM/YYYY', value=dt_contratacao_atual if dt_contratacao_atual else data_padrao)
+
+
+            col3, col4, col5 = st.columns(3)
+            with col3:
+                administrador = st.checkbox("Acesso Administrativo", value=st.session_state.administrador_atual, key="checkbox_administrador")
+            with col4:
+                agendamento = st.checkbox("Acesso à Agenda", value=st.session_state.agendamento_atual, key="checkbox_agendamento")
+            with col5:
+                edita_ponto = st.checkbox("Alterar Ponto", value=st.session_state.edita_ponto_atual, key="checkbox_edita_ponto")
+
+            submit_button = st.form_submit_button("Salvar Alterações", use_container_width=True)
+
+        if submit_button:
+            erros = []
+
+            # 🔹 Aplicar filtro nos campos antes da validação
+            novo_nome = limpar_texto(novo_nome, "nome", 100)
+            novo_cargo = limpar_texto(novo_cargo, "cargo", 50)
+
+            # 🔹 Validações
+            if not novo_nome or len(novo_nome.split()) < 2:
+                erros.append("❌ O nome deve conter pelo menos um sobrenome.")
+
+            if len(novo_nome) > 100:
+                erros.append("❌ O nome ultrapassa 100 caracteres.")
+
+            if not novo_cargo:
+                erros.append("❌ O cargo não pode estar vazio.")
+
+            if len(novo_cargo) > 50:
+                erros.append("❌ O cargo ultrapassa 50 caracteres.")
+
+            if re.search(r"[^A-Za-zÀ-ÖØ-öø-ÿ\s]", novo_cargo):
+                erros.append("❌ O cargo deve conter apenas letras e espaços.")
+
+            if not validar_email(novo_email):
+                erros.append("❌ O email informado não é válido.")
+
+            # 🔹 Exibir erros ou atualizar no banco
+            if erros:
+                for erro in erros:
+                    st.error(erro)
+            else:
                 conn = conexao_persistente
                 if conn:
                     cursor = conexao_persistente.cursor()
                     try:
-                        # Atualizar nome, cargo e status de administrador
+                        cursor.execute("ROLLBACK")  # Garante que não há transações pendentes antes da atualização
+
                         cursor.execute("""
                             UPDATE funcionarios 
-                            SET nome = ?, cargo = ?, administrador = ? 
-                            WHERE id = ?
-                        """, (novo_nome, novo_cargo, administrador, id_usuario))
-
-                        # Atualizar senha somente se a opção for escolhida e as senhas forem válidas
-                        if alterar_senha == "Sim" and nova_senha == confirmar_senha:
-                            senha_criptografada = criptografar_senha(nova_senha)
-                            cursor.execute("""
-                                UPDATE funcionarios 
-                                SET senha = ? 
-                                WHERE id = ?
-                            """, (senha_criptografada, id_usuario))
+                            SET nome = %s, email = %s, dtcontratacao = %s, cargo = %s, administrador = %s, agendamento = %s, edita_ponto = %s  
+                            WHERE id = %s
+                        """, (
+                            novo_nome,novo_email,nova_dt_contratacao,novo_cargo,int(administrador), int(agendamento), int(edita_ponto),id_usuario
+                        ))
 
                         conn.commit()
-                        st.success(f"Dados do funcionário {novo_nome} atualizados com sucesso!")
-                    except Exception as e:
-                        st.error(f"Erro ao atualizar os dados do funcionário: {e}")
-                    finally:
-                        ''
+                        st.success(f"Dados do funcionário {novo_nome} atualizados com sucesso! ✅")
 
-# Tela de administração
+                    except Exception as e:
+                        conn.rollback()  # Desfaz qualquer alteração em caso de erro
+                        st.error(f"Erro ao atualizar os dados do funcionário: {e}")
+
+    if alterar_senha:
+        with st.form("form_alterar_senha"):
+            nova_senha = st.text_input("Digite a nova senha", type="password", max_chars=100)
+            confirmar_senha = st.text_input("Confirme a nova senha", type="password", max_chars=100)
+
+            submit_senha = st.form_submit_button("Alterar Senha", use_container_width=True)
+
+            if submit_senha:
+                if len(nova_senha) < 6:
+                    st.error("A senha deve ter pelo menos 6 caracteres.")
+                elif nova_senha != confirmar_senha:
+                    st.error("As senhas não coincidem.")
+                else:
+                    conn = conexao_persistente
+                    if conn:
+                        cursor = conexao_persistente.cursor()
+                        try:
+                            cursor.execute("UPDATE funcionarios SET senha = %s WHERE id = %s", (criptografar_senha(nova_senha), id_usuario))
+                            conn.commit()
+                            st.success("Senha alterada com sucesso! ✅")
+                        except Exception as e:
+                            st.error(f"Erro ao atualizar a senha: {e}")
+
+
+
+### Tela para cadastrar usuario 
+
+
+# 🔹 Função para limpar entradas
+def limpar_texto(valor, tipo, max_length):
+    """Remove caracteres inválidos e limita o tamanho do campo"""
+    if not valor:
+        return ""
+
+    if tipo == "nome" or tipo == "cargo":
+        valor = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ\s]", "", valor)  # Apenas letras e espaços
+    
+    if tipo == "username":
+        valor = re.sub(r"[^A-Za-z0-9]", "", valor)  # Apenas letras e números
+
+    return valor[:max_length]  # Limita o número de caracteres
+
+# 🔹 Validação do email
+def validar_email(valor):
+    """Valida se o email está no formato correto"""
+    if not valor or len(valor) > 100:
+        return False
+    return bool(re.fullmatch(r"^[\w\.-]+@[\w\.-]+\.\w+$", valor))
+
 def tela_administracao():
     st.markdown("<h1 style='text-align: center;'>Cadastrar Funcionário</h1>", unsafe_allow_html=True)
+
+    # Variáveis de estado para limpar os campos
+    if "form_submitted" not in st.session_state:
+        st.session_state["form_submitted"] = False
+
     with st.form("form_cadastro"):
-        nome = st.text_input("Nome do Funcionário")
-        username = st.text_input("Nome de Usuário")
-        senha = st.text_input("Senha", type="password")
-        cargo = st.text_input("Cargo")
-        administrador = st.checkbox("Conceder acesso administrativo")
-        submit_button = st.form_submit_button("Cadastrar")
+        nome = st.text_input("Nome do Funcionário", max_chars=100, value="" if st.session_state["form_submitted"] else None)
+        username = st.text_input("Nome de Usuário", max_chars=50, value="" if st.session_state["form_submitted"] else None)
+        senha = st.text_input("Senha", type="password", max_chars=100, value="" if st.session_state["form_submitted"] else "")
+        confirmar_senha = st.text_input("Confirme a Senha", type="password", max_chars=100, value="" if st.session_state["form_submitted"] else "")
+        cargo = st.text_input("Cargo", max_chars=50, value="" if st.session_state["form_submitted"] else None)
+        email = st.text_input("Email", max_chars=100, value="" if st.session_state["form_submitted"] else None)
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            administrador = st.checkbox("Acesso Administrativo", value=False if st.session_state["form_submitted"] else None)
+        with col2:
+            agendamento = st.checkbox("Acesso a Agenda", value=False if st.session_state["form_submitted"] else None)
+        with col3:
+            edita_ponto = st.checkbox("Alterar Ponto", value=False if st.session_state["form_submitted"] else None)
+        
+        submit_button = st.form_submit_button("Cadastrar", use_container_width=True)
 
         if submit_button:
-            conn = conexao_persistente()
-            if conn:
-                cursor = conexao_persistente.cursor()
-                senha_criptografada = criptografar_senha(senha)
-                try:
-                    cursor.execute("""
-                        INSERT INTO funcionarios (nome, username, senha, cargo, administrador)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (nome, username, senha_criptografada, cargo, administrador))
-                    conn.commit()
-                    st.success(f"Funcionário {nome} cadastrado com sucesso!")
-                except Exception as e:
-                    st.error(f"Erro ao cadastrar funcionário: {e}")
+            erros = []
+
+            # 🔹 Aplicar filtro nos campos antes da validação
+            nome = limpar_texto(nome, "nome", 100)
+            cargo = limpar_texto(cargo, "cargo", 50)
+            username = limpar_texto(username, "username", 50)
+
+            # 🔹 Validações
+            if not nome or len(nome.split()) < 2:
+                erros.append("❌ O nome deve conter pelo menos um sobrenome.")
+
+            if not nome:
+                erros.append("❌ O nome não pode estar vazio.")
+
+            if len(nome) > 100:
+                erros.append("❌ O nome ultrapassa 100 caracteres.")
+
+            if not username:
+                erros.append("❌ O nome de usuário não pode estar vazio.")
+
+            if len(username) > 50:
+                erros.append("❌ O nome de usuário ultrapassa 50 caracteres.")
+
+            if username_em_uso(username):
+                erros.append("❌ Este nome de usuário já está em uso. Escolha outro.")
+
+            if not senha or len(senha) < 6:
+                erros.append("❌ A senha deve ter pelo menos 6 caracteres.")
+
+            if len(senha) > 100:
+                erros.append("❌ A senha ultrapassa 100 caracteres.")
+
+            if senha != confirmar_senha:
+                erros.append("❌ As senhas não coincidem. Por favor, tente novamente.")
+
+            if not cargo:
+                erros.append("❌ O cargo não pode estar vazio.")
+
+            if len(cargo) > 50:
+                erros.append("❌ O cargo ultrapassa 50 caracteres.")
+
+            if re.search(r"[^A-Za-zÀ-ÖØ-öø-ÿ\s]", cargo):  # Verifica se tem número ou caractere especial
+                erros.append("❌ O cargo deve conter apenas letras e espaços.")
+
+            if not validar_email(email):
+                erros.append("❌ O email informado não é válido.")
+
+            # 🔹 Exibir erros ou cadastrar no banco
+            if erros:
+                for erro in erros:
+                    st.error(erro)
+            else:
+                conn = conexao_persistente
+                if conn:
+                    cursor = conn.cursor()
+                    cursor.execute("ROLLBACK")
+                    senha_criptografada = criptografar_senha(senha)
+                    try:
+                        # Converta os checkboxes para 1 ou 0
+                        admin_valor = 1 if administrador else 0
+                        agendamento_valor = 1 if agendamento else 0
+                        alterar_ponto = 1 if edita_ponto else 0
+
+                        # 🔹 Inserir novo usuário no banco de dados
+                        cursor.execute("""
+                            INSERT INTO funcionarios (nome, username, senha, cargo, administrador, agendamento, email, edita_ponto)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (nome, username, senha_criptografada, cargo, admin_valor, agendamento_valor, email, alterar_ponto))
+
+                        conn.commit()
+
+                        placeholder = st.empty() 
+                        placeholder.success(f"Funcionário {nome} cadastrado com sucesso! ✅")
+                        tm.sleep(3)
+
+                        # Marca o formulário como submetido para limpar os campos
+                        st.session_state["form_submitted"] = True
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao cadastrar funcionário: {e}")
+
+def username_em_uso(username):
+    """Verifica se o username já está em uso no banco de dados."""
+    conn = conexao_persistente
+    if conn:
+        cursor = conn.cursor()
+        cursor.execute("ROLLBACK")
+        cursor.execute("SELECT COUNT(*) FROM funcionarios WHERE username = %s", (username,))
+        resultado = cursor.fetchone()
+        return resultado[0] > 0  # Retorna True se já existir, False se estiver disponível
+    return False
+
+
+
+
+
+def tela_admin_faltas():
+    st.markdown("<h1 style='text-align: center;'>Faltas Registradas</h1>", unsafe_allow_html=True)
+
+    # Conexão com o banco de dados
+    conn = conexao_persistente
+    if conn:
+        cursor = conn.cursor()
+        cursor.execute("ROLLBACK")
+        cursor.execute("""
+            SELECT F.FUNCIONARIO_ID, F.DATA, F.JUSTIFICATIVA, F.DOCUMENTO, FUNC.NOME
+            FROM FALTAS F
+            JOIN FUNCIONARIOS FUNC ON F.FUNCIONARIO_ID = FUNC.ID
+            ORDER BY F.DATA DESC
+        """)
+        registros = cursor.fetchall()
+
+        if registros:
+            # Criar dataframe para exibição
+            dados = []
+            documentos = []  # Lista para armazenar documentos e informações associadas
+
+            for registro in registros:
+                id_funcionario, data, justificativa, documento, nome = registro
+                possui_documento = "Sim" if documento else "Não"
+                dados.append({
+                    "X": False,
+                    "Data": data.strftime("%d/%m/%Y"),
+                    "Funcionário": nome,
+                    "Justificativa": justificativa,
+                    "Anexo": possui_documento
+                })
+
+                # Adicionar documento para referência
+                documentos.append({
+                    "Funcionário": nome,
+                    "Data": data.strftime("%d/%m/%Y"),
+                    "Anexo": documento
+                })
+
+            # Criar dataframe
+            df = pd.DataFrame(dados)
+
+            # Adicionar filtro de funcionário com múltipla seleção
+            funcionarios = df["Funcionário"].unique()
+            funcionarios_selecionados = st.multiselect("Selecione os Funcionários", options=funcionarios, default=[])
+
+            # Filtrar dataframe com base na seleção
+            if funcionarios_selecionados:
+                df = df[df["Funcionário"].isin(funcionarios_selecionados)]
+
+            # Configurar colunas para DataFrame interativo
+            edited_df = st.data_editor(
+                df,
+                column_config={
+                    "X": st.column_config.CheckboxColumn(
+                        "X",
+                        help="Marque para selecionar os documentos que deseja baixar.",
+                    ),
+                    "Data": "Data",
+                    "Funcionário": "Funcionário",
+                    "Justificativa": "Justificativa",
+                    "Anexo": "Anexo",
+                },
+                hide_index=True,disabled=("Data","Funcionário" ,"Justificativa","Anexo"),
+                use_container_width=True,
+            )
+
+            # Coletar documentos selecionados para download
+            selecionados = edited_df[edited_df["X"] == True]
+            if not selecionados.empty:
+                for _, row in selecionados.iterrows():
+                    doc_info = next((doc for doc in documentos if doc["Funcionário"] == row["Funcionário"] and doc["Data"] == row["Data"]), None)
+                    if doc_info and doc_info["Anexo"]:
+                        st.download_button(
+                            label="Baixar Documento",
+                            data=bytes(doc_info["Anexo"]), 
+                            file_name=f"documento_{row['Funcionário']}.pdf",
+                            mime="application/pdf",
+                        )
+            else:
+                ''#st.warning("Nenhum documento foi selecionado para download.")
+        else:
+            st.info("Nenhuma falta registrada até o momento.")
+    else:
+        st.error("Erro na conexão com o banco de dados.")
+
+
+#falta do usuario logado
+
+def tela_usuario_faltas():
+    usuario = st.session_state["usuario"]
+    st.markdown(f"<h1 style='text-align: center;'>Minhas Faltas</h1>", unsafe_allow_html=True)
+
+    # Conexão com o banco de dados
+    conn = conexao_persistente
+    if conn:
+        cursor = conn.cursor()
+        cursor.execute("ROLLBACK")
+        cursor.execute("""
+            SELECT DATA, JUSTIFICATIVA, DOCUMENTO
+            FROM FALTAS
+            WHERE FUNCIONARIO_ID = %s
+            ORDER BY DATA DESC
+        """, (usuario["id"],))
+        registros = cursor.fetchall()
+
+        if registros:
+            # Criar dataframe para exibição
+            dados = []
+            documentos = []  # Lista para armazenar documentos e informações associadas
+
+            for registro in registros:
+                data, justificativa, documento = registro
+                possui_documento = "Sim" if documento else "Não"
+                dados.append({
+                    "X": False,
+                    "Data": data.strftime("%d/%m/%Y"),
+                    "Justificativa": justificativa,
+                    "Anexo": possui_documento
+                })
+
+                # Adicionar documento para referência
+                documentos.append({
+                    "Data": data.strftime("%d/%m/%Y"),
+                    "Anexo": documento
+                })
+
+            # Criar dataframe
+            df = pd.DataFrame(dados)
+
+            # Configurar colunas para DataFrame interativo
+            edited_df = st.data_editor(
+                df,
+                column_config={
+                    "X": st.column_config.CheckboxColumn(
+                        "X",
+                        help="Marque para selecionar os documentos que deseja baixar.",
+                    ),
+                    "Data": "Data",
+                    "Justificativa": "Justificativa",
+                    "Anexo": "Anexo",
+                },
+                hide_index=True,disabled=("Data", "Justificativa","Anexo"),
+                use_container_width=True,
+            )
+
+            # Coletar documentos selecionados para download
+            selecionados = edited_df[edited_df["X"] == True]
+            if not selecionados.empty:
+                for _, row in selecionados.iterrows():
+                    doc_info = next((doc for doc in documentos if doc["Data"] == row["Data"]), None)
+                    if doc_info and doc_info["Anexo"]:
+                        st.download_button(
+                            label="Baixar Documento",
+                            data=bytes(doc_info["Anexo"]), 
+                            file_name=f"documento_{row['Data']}.pdf",
+                            mime="application/pdf",
+                        )
+            else:
+                ''#st.warning("Nenhum documento foi selecionado para download.")
+        else:
+            st.info("Você não possui faltas registradas!")
+    else:
+        st.error("Não foi possível conectar ao banco de dados.")
+
+
+# Escopo para acesso ao Google Calendar
+SCOPES = ['https://www.googleapis.com/auth/calendar']
+
+# Função para autenticação usando OAuth2
+def autenticar_google_calendar():
+    credenciais = None
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            credenciais = pickle.load(token)
+
+    if not credenciais or not credenciais.valid:
+        if credenciais and credenciais.expired and credenciais.refresh_token:
+            credenciais.refresh(Request())
+        else:
+            fluxo = InstalledAppFlow.from_client_secrets_file(
+                'AutenticaCalendar.json', SCOPES
+            )
+            credenciais = fluxo.run_local_server(port=0)
+        
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(credenciais, token)
+    
+    return credenciais
+# Função para obter o ID do calendário autenticado
+def obter_id_calendario(credenciais):
+    servico = build('calendar', 'v3', credentials=credenciais)
+    calendario = servico.calendars().get(calendarId='primary').execute()
+    return calendario['id']
+
+#
+def adicionar_evento_calendario(servico, calendario_id, titulo, inicio, fim, emails_convidados=None):
+    """Adiciona um evento ao Google Calendar"""
+    try:
+        evento = {
+            'summary': titulo,  # Título do evento
+            'start': {'dateTime': f"{inicio}T00:00:00-03:00", 'timeZone': 'America/Sao_Paulo'},
+            'end': {'dateTime': f"{fim}T23:59:59-03:00", 'timeZone': 'America/Sao_Paulo'},
+            'attendees': [{'email': email} for email in emails_convidados] if emails_convidados else [],
+        }
+
+        # Envia o evento para o Google Calendar
+        servico.events().insert(calendarId=calendario_id, body=evento).execute()
+        #print("Evento criado com sucesso:", json.dumps(response, indent=2))
+    except:
+        ''
+    
+
+def obter_usuario_logado():
+    usuario = st.session_state.get("usuario", {})
+    
+    if isinstance(usuario, dict):  # Certifique-se de que 'usuario' é um dicionário
+        nome_completo = usuario.get("nome", "Desconhecido")  # Ajuste para pegar o campo correto
+    else:
+        nome_completo = usuario  # Se for uma string diretamente
+    
+    partes_nome = nome_completo.split()
+    return f"{partes_nome[0]} {partes_nome[1]}" if len(partes_nome) >= 2 else nome_completo
+
+def exibir_formulario_ferias():
+    creds = autenticar_google_calendar()
+    calendario_id = obter_id_calendario(creds)
+    servico = build('calendar', 'v3', credentials=creds)
+    
+    st.markdown("<h1 style='text-align: center;'>Marcar Férias</h1>", unsafe_allow_html=True)
+    
+    conn = conexao_persistente
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("ROLLBACK")
+            cursor.execute("""
+                SELECT ID, NOME, EMAIL
+                FROM FUNCIONARIOS
+                ORDER BY 2
+            """)
+            funcionarios = cursor.fetchall()
+        except Exception as e:
+            st.error(f"Erro ao carregar os funcionários: {e}")
+            return
+    else:
+        st.error("Erro na conexão com o banco de dados.")
+        return
+
+    if not funcionarios:
+        st.error("Nenhum funcionário encontrado no banco de dados.")
+        return
+    
+    if "funcionarios_dict" not in st.session_state:
+        st.session_state["funcionarios_dict"] = {
+            f"{nome}": {"id": id, "email": email} for id, nome, email in funcionarios
+        }
+    
+    usuario_logado = obter_usuario_logado()  # Captura usuário logado da sessão
+    
+    # Inicializar o estado, se necessário
+    if "funcionario_selecionado" not in st.session_state:
+        primeiro_funcionario = list(st.session_state["funcionarios_dict"].keys())[0]
+        st.session_state["funcionario_selecionado"] = primeiro_funcionario
+        st.session_state["emails_convidados"] = st.session_state["funcionarios_dict"][primeiro_funcionario]["email"] or ""
+
+    # Atualizar os e-mails convidados ao mudar o funcionário
+    def update_emails_convidados():
+        """Atualiza os e-mails convidados no estado ao mudar o funcionário."""
+        funcionario_atual = st.session_state["funcionario_selecionado"]
+        if funcionario_atual in st.session_state["funcionarios_dict"]:
+            st.session_state["emails_convidados"] = st.session_state["funcionarios_dict"][funcionario_atual]["email"] or ""
+
+    funcionario_selecionado = st.selectbox(
+        "Selecione o Funcionário",
+        options=list(st.session_state["funcionarios_dict"].keys()),
+        index=list(st.session_state["funcionarios_dict"].keys()).index(st.session_state["funcionario_selecionado"]),
+        key="funcionario_selecionado",
+        on_change=update_emails_convidados
+    )
+    
+    with st.form("formulario_ferias"):
+        col1, col2 = st.columns(2)
+        with col1:
+            data_inicio = st.date_input("Data de Início", format="DD/MM/YYYY")
+        with col2:
+            data_fim = st.date_input("Data de Fim", format="DD/MM/YYYY")
+        
+        ano_referencia = f"{data_inicio.year-1}/{data_inicio.year}"
+        
+        col3, col4 = st.columns(2)
+        with col3:
+            st.text_input("Ano de Referência", ano_referencia)
+        with col4:
+            st.text_input("Responsável pela Autorização", usuario_logado, disabled=True)
+        
+        emails_convidados = st.text_area(
+            "E-mails:",
+            placeholder="exemplo1@dominio.com, exemplo2@dominio.com",
+            key="emails_convidados",
+        )
+        
+        botao_submeter = st.form_submit_button("Marcar Férias", use_container_width=True)
+        
+        if botao_submeter:
+            if data_inicio > data_fim:
+                st.error("A data de início não pode ser maior que a data de fim.")
+            elif not funcionario_selecionado:
+                st.error("O funcionário é obrigatório.")
+            else:
+                funcionario_id = st.session_state["funcionarios_dict"][funcionario_selecionado]["id"]
+                titulo = f"Férias: {funcionario_selecionado.split(' ')[0]}"
+                emails_formatados = [email.strip() for email in emails_convidados.split(",") if email.strip()]
+                registrado_em = datetime.now().strftime('%Y-%m-%d')
+                
+                adicionar_evento_calendario(
+                    servico,
+                    calendario_id,
+                    titulo,
+                    data_inicio.strftime('%Y-%m-%d'),
+                    (data_fim + timedelta(days=1)).strftime('%Y-%m-%d'),
+                    emails_formatados,
+                )
+                
+                if conn:
+                    try:
+                        cursor.execute("""
+                            INSERT INTO FERIAS (FUNCIONARIO_ID, DATA_INICIO, DATA_FIM, ANO_REFERENCIA, RESPONSAVEL_AUTORIZACAO, EMAILS_ENVOLVIDOS,REGISTRADO_EM)
+                            VALUES (%s, %s, %s, %s, %s, %s,%s)
+                        """, (funcionario_id, data_inicio, data_fim, ano_referencia, usuario_logado, ','.join(emails_formatados),registrado_em))
+
+                        conn.commit()
+                        st.success(f"Férias de {funcionario_selecionado.split(' ')[0]} adicionadas ao calendário e salvas no banco de dados!")
+                    except Exception as e:
+                        st.error(f"Erro ao salvar no banco de dados: {e}")
+
+
+
+
+
+def minhas_ferias_marcadas():
+    usuario = st.session_state["usuario"]
+    st.markdown("<h1 style='text-align: center;'>Minhas Férias</h1>", unsafe_allow_html=True)
+
+    # Obter a conexão com o banco de dados
+    conn = conexao_persistente
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("ROLLBACK")
+            # Buscar todas as férias marcadas
+            cursor.execute("""
+                SELECT 
+                    f.NOME AS Funcionario,
+                    ferias.DATA_INICIO AS DataInicio,
+                    ferias.DATA_FIM AS DataFim,
+                    ferias.REGISTRADO_EM AS RegistradoEm,
+                    ferias.ano_referencia
+                FROM FERIAS 
+                JOIN FUNCIONARIOS f ON ferias.FUNCIONARIO_ID = f.ID
+                WHERE FUNCIONARIO_ID = %s
+                ORDER BY ferias.DATA_INICIO DESC
+            """,(usuario["id"],))
+            registros = cursor.fetchall()
+
+            if registros:
+                # Criar o DataFrame para exibir os dados
+                df = pd.DataFrame(
+                    registros,
+                    columns=["Funcionário", "Data de Início", "Data Final","Aprovado em","Referência"]
+                )
+
+                # Formatando as colunas de data para exibição
+                df["Data de Início"] = pd.to_datetime(df["Data de Início"]).dt.strftime("%d/%m/%Y")
+                df["Data Final"] = pd.to_datetime(df["Data Final"]).dt.strftime("%d/%m/%Y")
+                df["Aprovado em"] = pd.to_datetime(df["Aprovado em"]).dt.strftime("%d/%m/%Y")
+
+                # Exibir o DataFrame no Streamlit
+                st.data_editor(df,disabled=True,hide_index=True,use_container_width=True )
+
+            else:
+                st.warning("Nenhuma férias marcada no momento.")
+        except Exception as e:
+            st.error(f"Erro ao buscar férias marcadas: {e}")
+        finally:
+            ''
+    else:
+        st.error("Erro na conexão com o banco de dados.")
+
+#Listar férias de todos os funcionários 
+def ferias_marcadas():
+    st.markdown("<h1 style='text-align: center;'>Férias Agendadas</h1>", unsafe_allow_html=True)
+
+    # Obter a conexão com o banco de dados
+    conn = conexao_persistente
+    if conn:
+        try:
+            cursor = conexao_persistente.cursor()
+            # Buscar todos os nomes dos funcionários para o filtro
+            cursor.execute("SELECT NOME FROM FUNCIONARIOS ORDER BY NOME")
+            todos_funcionarios = [row[0] for row in cursor.fetchall()]
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                funcionarios_selecionados = st.multiselect(
+                    "Selecione os Funcionários:", options=todos_funcionarios, default=[]
+                )
+            with col2:
+                data_inicio_filtro = st.date_input("Data de Início", value=None, format="DD/MM/YYYY")
+            with col3:
+                data_fim_filtro = st.date_input("Data de Fim", value=None, format="DD/MM/YYYY")
+
+            # Construir a cláusula WHERE com base na seleção
+            filtros = []
+            if funcionarios_selecionados:
+                filtro_funcionarios = "(" + ", ".join(f"'{nome}'" for nome in funcionarios_selecionados) + ")"
+                filtros.append(f"f.NOME IN {filtro_funcionarios}")
+            
+            if data_inicio_filtro:
+                filtros.append(f"ferias.DATA_INICIO >= '{data_inicio_filtro}'")
+            
+            if data_fim_filtro:
+                filtros.append(f"ferias.DATA_FIM <= '{data_fim_filtro}'")
+            
+            where_clause = " WHERE " + " AND ".join(filtros) if filtros else ""
+            
+            query = f"""
+                SELECT 
+                    f.NOME AS Funcionario,
+                    ferias.DATA_INICIO,
+                    ferias.DATA_FIM,
+                    ferias.REGISTRADO_EM,
+                    ferias.ano_referencia
+                FROM FERIAS
+                JOIN FUNCIONARIOS f ON ferias.FUNCIONARIO_ID = f.ID
+                {where_clause}
+                ORDER BY 1
+            """
+
+            # Executar a query e buscar os registros
+            cursor.execute(query)
+            registros = cursor.fetchall()
+
+            if registros:
+                # Criar o DataFrame para exibir os dados
+                df = pd.DataFrame(
+                    registros,
+                    columns=["Funcionário", "Data de Início", "Data Final", "Aprovado em", "Referência"]
+                )
+
+                # Formatando as colunas de data para exibição
+                df["Data de Início"] = pd.to_datetime(df["Data de Início"]).dt.strftime("%d/%m/%Y")
+                df["Data Final"] = pd.to_datetime(df["Data Final"]).dt.strftime("%d/%m/%Y")
+                df["Aprovado em"] = pd.to_datetime(df["Aprovado em"]).dt.strftime("%d/%m/%Y")
+
+                # Exibir o DataFrame no Streamlit
+                st.dataframe(df, hide_index=True, use_container_width=True)
+
+            else:
+                st.warning("Nenhuma férias marcada no momento.")
+        except Exception as e:
+            st.error(f"Erro ao buscar férias marcadas: {e}")
+    else:
+        st.error("Erro na conexão com o banco de dados.")
+
+
+
+
+#Adiconar envento no calendario
+
+def add_evento():
+
+    # Autenticar e obter credenciais para o Google Calendar
+    creds = autenticar_google_calendar()
+    calendario_id = obter_id_calendario(creds)
+    servico = build('calendar', 'v3', credentials=creds)
+
+    st.markdown("<h1 style='text-align: center;'>Agendamento</h1>", unsafe_allow_html=True)
+
+    # Obter lista de funcionários com seus e-mails do banco
+    conn = conexao_persistente
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("ROLLBACK")
+            cursor.execute("""
+                SELECT ID, NOME, EMAIL
+                FROM FUNCIONARIOS
+                ORDER BY 2
+            """)
+            funcionarios = cursor.fetchall()  # Retorna [(ID, Nome, Email)]
+        except Exception as e:
+            st.error(f"Erro ao carregar os funcionários: {e}")
+            return
+    else:
+        st.error("Erro na conexão com o banco de dados.")
+        return
+
+    if not funcionarios:
+        st.error("Nenhum funcionário encontrado no banco de dados.")
+        return
+
+    # Criar um dicionário para mapear o nome para ID e e-mail
+    funcionarios_dict = {
+        nome: {"id": id, "email": email} for id, nome, email in funcionarios
+    }
+
+    # Seleção de múltiplos funcionários
+    funcionarios_selecionados = st.multiselect(
+        "",
+        help=None,
+        options=list(funcionarios_dict.keys()),
+        placeholder="Selecione os Funcionários"
+    )
+
+    # Obter os e-mails dos funcionários selecionados
+    emails_funcionarios_selecionados = [
+        funcionarios_dict[funcionario]["email"]
+        for funcionario in funcionarios_selecionados
+    ]
+
+    # Formulário para preenchimento dos dados
+    with st.form("agendamento"):
+        col1, col2 = st.columns(2)
+        with col1:
+            data = st.date_input("Data", format="DD/MM/YYYY")
+        with col2:
+            titulo = st.text_input("Título",placeholder="Digite o título da reunião",help="Insira um título descritivo para o agendamento.")
+
+        col3, col4 = st.columns(2)
+        with col3:
+            hora_inicio = st.time_input("Hora de Início", key="hora_inicio")
+        with col4:
+            hora_fim = st.time_input("Hora de Fim", key="hora_fim")
+
+        # Preencher o campo de e-mails com os e-mails dos funcionários selecionados
+        emails_convidados = st.text_area(
+            "E-mails dos Envolvidos (separados por vírgula)",
+            value=", ".join(emails_funcionarios_selecionados),  # Usa os e-mails obtidos
+            placeholder="exemplo1@dominio.com, exemplo2@dominio.com",
+            key="emails_convidados",
+        )
+
+        botao_submeter = st.form_submit_button("Agendar",use_container_width=True)
+        
+    if botao_submeter:
+        emails_formatados = [email.strip() for email in emails_convidados.split(",") if email.strip()]
+
+        if not titulo or not emails_formatados:
+            st.error("Título e e-mails dos envolvidos são obrigatórios.")
+        elif hora_inicio >= hora_fim:
+            st.error("A hora de início deve ser menor que a hora de fim.")
+        else:
+            try:
+                # Formatar os horários para o formato ISO 8601
+                inicio = f"{data.strftime('%Y-%m-%d')}T{hora_inicio.strftime('%H:%M:%S')}"
+                fim = f"{data.strftime('%Y-%m-%d')}T{hora_fim.strftime('%H:%M:%S')}"
+
+                # Adicionar ao Google Calendar
+                adicionar_evento_calendario(
+                    servico,
+                    calendario_id,
+                    titulo,
+                    inicio,
+                    fim,
+                    emails_formatados,
+                )
+                placeholder = st.empty() 
+                placeholder.success(f"Evento agendado com sucesso!", icon="✅")
+                tm.sleep(2)
+                placeholder.empty()
+            except Exception as e:
+                st.error(f"Erro ao agendar evento: {e}")
+
+
+
+
+# Função para exibição do Google Calendar
+def exibir_calendario():
+    st.markdown("<h1 style='text-align: center;'>Agenda</h1>", unsafe_allow_html=True)
+
+    calendar_html = '''
+    <iframe src="https://calendar.google.com/calendar/embed?height=600&wkst=1&ctz=America%2FSao_Paulo&src=ZGFuaWxvYW5kcmUyN0BnbWFpbC5jb20&color=%234285F4" 
+            style="border:solid 1px #777" 
+            width="800" 
+            height="600" 
+            frameborder="0" 
+            scrolling="no">
+    </iframe>
+    '''
+    st.markdown(calendar_html, unsafe_allow_html=True)
+
+
+
 
 # Iniciar o aplicativo
 if __name__ == "__main__":
-    st.set_page_config(page_title="Sistema de Ponto")
     tela_inicial()
