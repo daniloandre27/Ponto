@@ -38,7 +38,7 @@ def carregar_configuracao():
 
 # 🔹 Carregar configurações do banco de dados
 DB_CONFIG = carregar_configuracao()
-
+SUPABASE_CONFIG = st.secrets["supabase"]
 # 🔹 Função para obter conexão persistente
 @st.cache_resource
 def obter_conexao_persistente():
