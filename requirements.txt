@@ -7,4 +7,3 @@ openpyxl
 google-auth-oauthlib
 google-auth
 google-api-python-client
-supabase-py
