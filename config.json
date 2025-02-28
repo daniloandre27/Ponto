@@ -2,6 +2,6 @@
     "database": "dados",
     "user": "postgres",
     "password": "1234",
-    "host": "26.223.207.100",
+    "host": "db.ycnwzcqukpmevnqdhrdr.supabase.co",
     "port": 5432
 }
