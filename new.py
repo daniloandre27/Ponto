@@ -22,6 +22,7 @@ from openpyxl.styles import Alignment
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from supabase import create_client, Client
 st.set_page_config(page_title="Sistema de Ponto", layout="centered")
 # 🔹 Função para carregar as configurações do banco de dados
 def carregar_configuracao():
@@ -41,20 +42,22 @@ DB_CONFIG = carregar_configuracao()
 # 🔹 Função para obter conexão persistente
 @st.cache_resource
 def obter_conexao_persistente():
-    if not DB_CONFIG:
-        st.error("Configurações do banco não carregadas.")
-        return None
-    
     try:
-        # 🔹 Criar conexão ao Postgre usando a sintaxe correta
-        connection = psycopg2.connect(dbname=DB_CONFIG["database"], user=DB_CONFIG["user"], password=DB_CONFIG["password"], host=DB_CONFIG["host"], port=5432)
-        return connection
-    except KeyError as e:
-        st.error(f"Configuração ausente no 'config.json': {e}")
-        return None
+        supabase = create_client(SUPABASE_CONFIG["url"], SUPABASE_CONFIG["key"])
+        return supabase
     except Exception as e:
-        st.error(f"Erro ao conectar ao banco de dados: {e}")
+        st.error(f"Erro ao conectar ao Supabase: {e}")
         return None
+
+def testar_conexao():
+    supabase = obter_conexao_supabase()
+    if supabase:
+        try:
+            response = supabase.table("funcionarios").select("id").limit(1).execute()
+            st.success("Conexão com o Supabase via API estabelecida com sucesso!")
+            st.write(response.data)
+        except Exception as e:
+            st.error(f"Erro ao testar a conexão: {e}")
 
 # 🔹 Criar a conexão persistente
 conexao_persistente = obter_conexao_persistente()
